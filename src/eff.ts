@@ -7,6 +7,8 @@ export interface Op {
   readonly effect: string
   readonly name: string
   readonly args: readonly unknown[]
+  /** of a sensitive effect: handled only under its audit */
+  readonly sensitive?: boolean
 }
 
 const PURE = 0

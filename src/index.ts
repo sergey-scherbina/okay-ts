@@ -19,3 +19,5 @@ export {
   type Result,
   type Sig,
 } from "./effects.ts"
+export { Audit, audit, intercept, observe, type AuditedAll, type Clauses, type Pass, type Seen, type Watch } from "./intercept.ts"
+export { type Audited, type Handled, type Kind } from "./effects.ts"
