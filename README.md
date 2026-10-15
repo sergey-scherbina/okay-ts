@@ -104,6 +104,32 @@ What the types guarantee holds for code without casts: TypeScript's types are er
 `perform` of an audited operation passes them. At run time a sensitive operation reaches only a handler of its audited
 name.
 
+## Waiting on the world, and the steps underneath
+
+`wait(promise)` (or `wait(() => promise)`): an operation of `Async` whose value is the promise's; `p.runPromise()`
+awaits each — a program whose row is `Async` alone, the rest handled. A rejection is thrown WHERE the operation is: a
+generator's `try`/`catch` around the `yield*` catches it, as an exception of the program's own functions. Cancelled
+(`runPromise({ signal })`, an `AbortSignal`): its generators' `finally` run — performing effects of their own if they
+do — and the promise rejects with `Cancelled`.
+
+```ts
+const p = eff(function* () {
+  try {
+    const user = yield* wait(() => fetchUser(id))
+    yield* Log.tell(`got ${user.name}`)
+    return user
+  } finally {
+    yield* Log.tell("done")
+  }
+})
+await p.handle(Log.collect()).runPromise({ signal })
+```
+
+Underneath, okay-kernel's protocol: `start(p, host?)` runs a program to its first `Step` — `done`, `yield` (an operation
+no handler of it has in force, and its rest `k`: `resume(x)`, `fail(e)`, `cancel()`, any number of times), `failed` (an
+exception not caught, as data), `cancelled`. Before handing an operation out it asks the `host` to answer it in place
+(`Answers`: no rest taken). `run` and `runPromise` are drivers over it.
+
 ## The machine
 
 A node and a persistent stack of frames: a handler is a delimiter on it, a rest `k` the frames down to its handler —
@@ -134,13 +160,12 @@ operation makes (7% in the collector). Generators cost twice the data: a generat
 
 okay-core's suites, the same programs and values: `test/std.test.ts` (TestStd), `test/acceptance.test.ts`
 (TestAcceptance), `test/intercept.test.ts` (TestIntercept, okay-rs's `tests/intercept.rs`: the same trails),
-`test/types.test.ts` (what does not compile).
+`test/types.test.ts` (what does not compile), `test/async.test.ts` (promises, failures, cancellation, the steps).
 
 ## Next
 
-1. `Async`: an operation waiting on a `Promise`, `runPromise()`.
-2. Interoperability with okay-core and okay-kernel: okay-ts implementing the kernel's protocol (`Computation`, `Step`,
+1. Interoperability with okay-core and okay-kernel: okay-ts implementing the kernel's protocol (`Computation`, `Step`,
    `Resume`, `Answers`), a Scala.js module exporting it to JS (`okay-kernel-js`), the TCK run on okay-ts.
-3. A remote handler: the operation and its answer as JSON, `k` staying here — a TypeScript program, its sensitive
+2. A remote handler: the operation and its answer as JSON, `k` staying here — a TypeScript program, its sensitive
    effects handled (and audited) by a server in Scala.
-4. Answer-type modification (`$`, `shift0`, `PState`).
+3. Answer-type modification (`$`, `shift0`, `PState`).

@@ -1,4 +1,24 @@
-export { Do, Eff, ResumedTwice, Unhandled, defer, eff, perform, pure, run, type Op, type RowOf } from "./eff.ts"
+export {
+  Cancelled,
+  Do,
+  Eff,
+  ResumedTwice,
+  Unhandled,
+  defer,
+  eff,
+  perform,
+  pure,
+  run,
+  runPromise,
+  start,
+  wait,
+  type Answers,
+  type Async,
+  type Op,
+  type Resume,
+  type RowOf,
+  type Step,
+} from "./eff.ts"
 export {
   Choose,
   Reader,

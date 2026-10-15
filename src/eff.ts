@@ -53,6 +53,12 @@ export class Eff<A, E = never, M extends boolean = true> {
     return run(this)
   }
 
+  /** its value when every `Async` operation's promise is done — the rest of its effects handled; cancelled by
+   *  `signal`: its generators' `finally` run, the promise rejected with `Cancelled` */
+  runPromise(this: Eff<A, Async, boolean>, opts?: { readonly signal?: AbortSignal }): Promise<A> {
+    return runPromise(this, opts)
+  }
+
   // DO: a for over programs as data — a scope of the values bound, immutable, each step a function of it
 
   /** `key` bound to the value of `f(scope)` */
@@ -96,6 +102,18 @@ export function defer<A, E = never, M extends boolean = true>(f: () => Eff<A, E,
 /** the operation `op`: its value, given by the nearest handler of its effect */
 export function perform<A, E>(op: Op): Eff<A, E> {
   return new Eff(PERFORM, op, undefined)
+}
+
+/** WAITING ON THE WORLD: an operation whose value is a promise's — answered by `runPromise` */
+export interface Async {
+  readonly effect: "Async"
+  readonly kind: "Async"
+}
+
+/** the promise's value: the program waits for it; its rejection thrown where the operation is — a generator's
+ *  `try`/`catch` around the `yield*` catches it */
+export function wait<A>(p: Promise<A> | (() => Promise<A>)): Eff<A, Async> {
+  return perform({ effect: "Async", name: "await", args: [p] })
 }
 
 /** the start of a `Do`: an empty scope */
@@ -153,6 +171,8 @@ const F_HAND = 3
 class GenState {
   readonly it: Generator<Eff<unknown, unknown, boolean>, unknown, unknown>
   at = 0
+  /** its `finally` running, the program cancelled: when it is done, the cancellation goes on */
+  closing = false
   constructor(it: Generator<Eff<unknown, unknown, boolean>, unknown, unknown>) {
     this.it = it
   }
@@ -216,116 +236,291 @@ export class ResumedTwice extends Error {
 
 type Node = Eff<unknown, unknown, boolean>
 
-/** a program run to its value, every effect handled */
-export function run<A>(p: Eff<A, never, boolean>): A {
-  let cur: Node | null = p
-  let v: unknown = undefined
-  let stack: Frame | null = null
+// RUNNING: a program started, its steps (okay-kernel's protocol): it comes to a value (`done`), needs an operation
+// no handler of it has in force (`yield`, with its rest `k`: resumed, failed, cancelled — any number of times),
+// fails (an exception not caught, as data), or is cancelled
+
+export type Step<A> =
+  | { readonly tag: "done"; readonly value: A }
+  | { readonly tag: "yield"; readonly op: Op; readonly k: Resume<A> }
+  | { readonly tag: "failed"; readonly error: unknown }
+  | { readonly tag: "cancelled" }
+
+export interface Resume<A> {
+  /** on, with the operation's value */
+  resume(x: unknown): Step<A>
+  /** on, the operation having thrown `e` where it was performed: catchable inside */
+  fail(e: unknown): Step<A>
+  /** ended: its generators' `finally` run — programs too, so a step comes back; not catchable */
+  cancel(): Step<A>
+}
+
+/** a host answering operations in place, asked before an operation is handed out: no rest taken */
+export interface Answers {
+  answers(effect: string): boolean
+  value(op: Op): unknown
+}
+
+const RUN = 0
+const RETURN = 1
+const FAIL = 2
+const CANCEL = 3
+
+/** a program started: its first step */
+export function start<A>(p: Eff<A, any, boolean>, host?: Answers): Step<A> {
+  return exec<A>(RUN, p, undefined, null, host)
+}
+
+function exec<A>(mode0: number, cur0: Node | null, v0: unknown, stack0: Frame | null, host: Answers | undefined): Step<A> {
+  let mode = mode0
+  let cur: Node | null = cur0
+  let v: unknown = v0
+  let stack: Frame | null = stack0
   for (;;) {
-    if (cur === null) {
-      if (stack === null) return v as A
-      const f: Frame = stack
-      switch (f.t) {
-        case F_BIND:
-          stack = f.next
-          cur = (f.f as (a: unknown) => Node)(v)
-          break
-        case F_MAP:
-          stack = f.next
-          v = (f.f as (a: unknown) => unknown)(v)
-          break
-        case F_GEN: {
+    try {
+      for (;;) {
+        if (mode === RETURN) {
+          if (stack === null) return { tag: "done", value: v as A }
+          const f: Frame = stack
+          switch (f.t) {
+            case F_BIND:
+              stack = f.next
+              cur = (f.f as (a: unknown) => Node)(v)
+              mode = RUN
+              break
+            case F_MAP:
+              stack = f.next
+              v = (f.f as (a: unknown) => unknown)(v)
+              break
+            case F_GEN: {
+              const g = f.f as GenState
+              if (f.at !== g.at) throw new ResumedTwice("a generator's rest")
+              g.at++
+              stack = f.next
+              const r = g.it.next(v)
+              if (r.done) {
+                v = r.value
+                if (g.closing) mode = CANCEL
+              } else {
+                stack = new Frame(F_GEN, g, undefined, g.at, stack)
+                cur = r.value
+                mode = RUN
+              }
+              break
+            }
+            default:
+              stack = f.next
+              cur = (f.f as Impl).ret(v, f.s)
+              mode = RUN
+          }
+          continue
+        }
+        if (mode === FAIL) {
+          // `v` the error: thrown into the nearest generator — its `catch` goes on, else on down
+          while (stack !== null && stack.t !== F_GEN) stack = stack.next
+          if (stack === null) return { tag: "failed", error: v }
+          const f: Frame = stack
           const g = f.f as GenState
           if (f.at !== g.at) throw new ResumedTwice("a generator's rest")
           g.at++
-          const r = g.it.next(v)
-          if (r.done) {
-            stack = f.next
-            v = r.value
-          } else {
-            stack = new Frame(F_GEN, g, undefined, g.at, f.next)
-            cur = r.value
-          }
-          break
-        }
-        default:
           stack = f.next
-          cur = (f.f as Impl).ret(v, f.s)
-      }
-      continue
-    }
-    switch (cur.tag) {
-      case PURE:
-        v = cur.x
-        cur = null
-        break
-      case FLATMAP:
-        stack = new Frame(F_BIND, cur.y, undefined, 0, stack)
-        cur = cur.x as Node
-        break
-      case MAP:
-        stack = new Frame(F_MAP, cur.y, undefined, 0, stack)
-        cur = cur.x as Node
-        break
-      case DEFER:
-        cur = (cur.x as () => Node)()
-        break
-      case GEN: {
-        const g = new GenState((cur.x as () => Generator<Node, unknown, unknown>)())
-        const r = g.it.next()
-        g.at++
-        if (r.done) {
-          v = r.value
-          cur = null
-        } else {
-          stack = new Frame(F_GEN, g, undefined, g.at, stack)
-          cur = r.value
-        }
-        break
-      }
-      case HANDLE: {
-        const h = cur.y as Impl
-        stack = new Frame(F_HAND, h, h.init, 0, stack)
-        cur = cur.x as Node
-        break
-      }
-      case PERFORM: {
-        const op = cur.x as Op
-        let f: Frame | null = stack
-        while (f !== null && !(f.t === F_HAND && ((f.f as Impl).effect === op.effect || (f.f as Impl).effect === null)))
-          f = f.next
-        if (f === null) throw new Unhandled(op)
-        const hand: Frame = f
-        const h = hand.f as Impl
-        if (h.kind === ANSWER) {
-          v = h.value!(op, hand.s)
-          cur = null
-        } else if (h.kind === STATE) {
-          const [x, s2] = h.step!(op, hand.s)
-          stack = relay(stack, hand, new Frame(F_HAND, h, s2, 0, hand.next))
-          v = x
-          cur = null
-        } else {
-          const rest = new Rest(stack, hand)
-          let resumed = 0
-          const k = (x: unknown): Node => {
-            if (++resumed > 1 && !h.many) throw new ResumedTwice("a rest of a handler that resumes once")
-            return new Eff(RESUME, rest, x)
+          const r = g.it.throw(v)
+          if (r.done) {
+            v = r.value
+            mode = g.closing ? CANCEL : RETURN
+          } else {
+            stack = new Frame(F_GEN, g, undefined, g.at, stack)
+            cur = r.value
+            mode = RUN
           }
-          stack = hand.next
-          cur = h.clause!(op, k, hand.s)
+          continue
         }
-        break
+        if (mode === CANCEL) {
+          // each generator's `finally` run, its own operations performed; then on down
+          while (stack !== null && stack.t !== F_GEN) stack = stack.next
+          if (stack === null) return { tag: "cancelled" }
+          const f: Frame = stack
+          const g = f.f as GenState
+          stack = f.next
+          if (f.at !== g.at) continue
+          g.at++
+          g.closing = true
+          const r = g.it.return(undefined)
+          if (!r.done) {
+            stack = new Frame(F_GEN, g, undefined, g.at, stack)
+            cur = r.value
+            mode = RUN
+          }
+          continue
+        }
+        // RUN
+        const c: Node = cur!
+        switch (c.tag) {
+          case PURE:
+            v = c.x
+            mode = RETURN
+            break
+          case FLATMAP:
+            stack = new Frame(F_BIND, c.y, undefined, 0, stack)
+            cur = c.x as Node
+            break
+          case MAP:
+            stack = new Frame(F_MAP, c.y, undefined, 0, stack)
+            cur = c.x as Node
+            break
+          case DEFER:
+            cur = (c.x as () => Node)()
+            break
+          case GEN: {
+            const g = new GenState((c.x as () => Generator<Node, unknown, unknown>)())
+            const r = g.it.next()
+            g.at++
+            if (r.done) {
+              v = r.value
+              mode = RETURN
+            } else {
+              stack = new Frame(F_GEN, g, undefined, g.at, stack)
+              cur = r.value
+            }
+            break
+          }
+          case HANDLE: {
+            const h = c.y as Impl
+            stack = new Frame(F_HAND, h, h.init, 0, stack)
+            cur = c.x as Node
+            break
+          }
+          case PERFORM: {
+            const op = c.x as Op
+            let f: Frame | null = stack
+            while (f !== null && !(f.t === F_HAND && ((f.f as Impl).effect === op.effect || (f.f as Impl).effect === null)))
+              f = f.next
+            if (f === null) {
+              if (host !== undefined && host.answers(op.effect)) {
+                v = host.value(op)
+                mode = RETURN
+                break
+              }
+              return { tag: "yield", op, k: rest<A>(stack, host) }
+            }
+            const hand: Frame = f
+            const h = hand.f as Impl
+            if (h.kind === ANSWER) {
+              v = h.value!(op, hand.s)
+              mode = RETURN
+            } else if (h.kind === STATE) {
+              const [x, s2] = h.step!(op, hand.s)
+              stack = relay(stack, hand, new Frame(F_HAND, h, s2, 0, hand.next))
+              v = x
+              mode = RETURN
+            } else {
+              const r = new Rest(stack, hand)
+              let resumed = 0
+              const k = (x: unknown): Node => {
+                if (++resumed > 1 && !h.many) throw new ResumedTwice("a rest of a handler that resumes once")
+                return new Eff(RESUME, r, x)
+              }
+              stack = hand.next
+              cur = h.clause!(op, k, hand.s)
+            }
+            break
+          }
+          case RESUME: {
+            const r = c.x as Rest
+            stack = relay(r.from, r.hand, new Frame(F_HAND, r.hand.f, r.hand.s, 0, stack))
+            v = c.y
+            mode = RETURN
+            break
+          }
+          default:
+            throw new Error(`okay: not a node: ${c.tag}`)
+        }
       }
-      case RESUME: {
-        const rest = cur.x as Rest
-        stack = relay(rest.from, rest.hand, new Frame(F_HAND, rest.hand.f, rest.hand.s, 0, stack))
-        v = cur.y
-        cur = null
-        break
-      }
-      default:
-        throw new Error(`okay: not a node: ${cur.tag}`)
+    } catch (e) {
+      if (e instanceof ResumedTwice) throw e
+      v = e
+      mode = FAIL
     }
   }
+}
+
+/** the whole stack, the rest of a program handed out: resumed, failed, cancelled — any number of times */
+function rest<A>(stack: Frame | null, host: Answers | undefined): Resume<A> {
+  return {
+    resume: (x) => exec<A>(RETURN, null, x, stack, host),
+    fail: (e) => exec<A>(FAIL, null, e, stack, host),
+    cancel: () => exec<A>(CANCEL, null, undefined, stack, host),
+  }
+}
+
+/** a program run to its value, every effect handled */
+export function run<A>(p: Eff<A, never, boolean>): A {
+  const s = start(p)
+  switch (s.tag) {
+    case "done":
+      return s.value
+    case "failed":
+      throw s.error
+    case "yield":
+      throw new Unhandled(s.op)
+    case "cancelled":
+      throw new Cancelled()
+  }
+}
+
+/** a program cancelled */
+export class Cancelled extends Error {
+  constructor() {
+    super("okay: cancelled")
+  }
+}
+
+/** a program run to its value, each `Async` operation's promise awaited; cancelled by `signal` */
+export async function runPromise<A>(p: Eff<A, Async, boolean>, opts?: { readonly signal?: AbortSignal }): Promise<A> {
+  const signal = opts?.signal
+  let step = start(p)
+  for (;;) {
+    switch (step.tag) {
+      case "done":
+        return step.value
+      case "failed":
+        throw step.error
+      case "cancelled":
+        throw new Cancelled()
+      case "yield": {
+        const { op, k } = step
+        if (op.effect !== "Async") {
+          step = k.fail(new Unhandled(op))
+          break
+        }
+        if (signal?.aborted) {
+          step = k.cancel()
+          break
+        }
+        const a = op.args[0] as Promise<unknown> | (() => Promise<unknown>)
+        const promise = typeof a === "function" ? a() : a
+        const outcome = await settle(promise, signal)
+        step = outcome.ok ? k.resume(outcome.value) : outcome.aborted ? k.cancel() : k.fail(outcome.error)
+      }
+    }
+  }
+}
+
+type Outcome = { ok: true; value: unknown } | { ok: false; aborted: boolean; error: unknown }
+
+function settle(p: Promise<unknown>, signal: AbortSignal | undefined): Promise<Outcome> {
+  return new Promise<Outcome>((done) => {
+    const onAbort = () => done({ ok: false, aborted: true, error: signal!.reason })
+    signal?.addEventListener("abort", onAbort, { once: true })
+    p.then(
+      (value) => {
+        signal?.removeEventListener("abort", onAbort)
+        done({ ok: true, value })
+      },
+      (error) => {
+        signal?.removeEventListener("abort", onAbort)
+        done({ ok: false, aborted: false, error })
+      },
+    )
+  })
 }
