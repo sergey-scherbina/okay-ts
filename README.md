@@ -154,6 +154,29 @@ index (the kernel's `Among(xs)` turned into one and back). `test/kernel.test.ts`
 across in constant stack, every path of a choice resumed across, a generator's rest refused there as here, a round trip
 — skipped where okay-kernel-js is not built (`OKAY_KERNEL_JS`, else `../okay-kernel`'s).
 
+## With okay, the platform: its wire
+
+okay-ts is a FAR SIDE of okay's wire (okay's specs/remote-foreign.md): a host — okay's `ForeignWorker` over pipes, or
+its `ForeignServer` (specs/foreign-server.md) this side connects to — drives. `program` starts one of these programs;
+each operation no handler here answers goes to the host as `perform`, its rest kept here by id; the host runs it under
+its own handlers — a Scala callback: an audit, a policy, a bank — and continues that rest, the same one as many times
+as its handler resumes (a program of data: a choice made by the host, every path).
+
+```ts
+// a program here, its payments the server's: the policy and the trail on the other side of the wire
+await connect({ host: "bank.internal", port: 9000 }, {
+  checkout: (cart: Cart) => eff(function* () {
+    const total = yield* Prices.total(cart)            // handled here
+    return yield* Pay.transfer(cart.account, total)    // the host's: audited there
+  }).handle(prices),
+})
+```
+
+`serveStdio(programs)` serves the same over pipes, as a worker okay starts. A host's condition (a refusal) is thrown
+where the operation was performed — a generator's `try`/`catch` catches it. Values as okay's wire writes them (a record
+a `dict`, a big integer digits). `test/wire.test.ts`: the transcript's requests and answers, multi-shot, a condition, a
+forgotten run, over TCP.
+
 ## The machine
 
 A node and a persistent stack of frames: a handler is a delimiter on it, a rest `k` the frames down to its handler —
