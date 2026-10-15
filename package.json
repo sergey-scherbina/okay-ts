@@ -3,7 +3,6 @@
   "version": "0.1.0",
   "description": "okay-core's effects in TypeScript: a program as data, rows of effects in its type, handlers as values, k as data; interceptors for control and audit",
   "type": "module",
-  "license": "MIT",
   "exports": {
     ".": "./src/index.ts"
   },
