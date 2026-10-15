@@ -18,6 +18,7 @@ const HANDLE = 3
 const GEN = 4
 const RESUME = 5
 const DEFER = 6
+const MAP = 7
 
 export class Eff<A, E = never, M extends boolean = true> {
   declare readonly _A: () => A
@@ -39,7 +40,7 @@ export class Eff<A, E = never, M extends boolean = true> {
   }
 
   map<B>(f: (a: A) => B): Eff<B, E, M> {
-    return new Eff(FLATMAP, this, (a: A) => pure(f(a)))
+    return new Eff(MAP, this, f)
   }
 
   /** this program given to `h` — a handler: `p.handle(Config.value(5))` */
@@ -140,16 +141,13 @@ export function handleWith<B, E, M extends boolean>(p: Eff<unknown, unknown, boo
   return new Eff(HANDLE, p, h)
 }
 
-// THE MACHINE: a node and a stack of frames, persistent — a rest is a part of it, kept, re-laid any number of times
+// THE MACHINE: a node and a stack of frames, persistent — a rest is a part of it, kept, re-laid any number of times.
+// Two modes: a node to run (`cur`), or a value going back to the frame on top (`cur` null, `v` the value)
 
-class Bind {
-  readonly f: (a: unknown) => Eff<unknown, unknown, boolean>
-  readonly next: Frame | null
-  constructor(f: (a: unknown) => Eff<unknown, unknown, boolean>, next: Frame | null) {
-    this.f = f
-    this.next = next
-  }
-}
+const F_BIND = 0
+const F_MAP = 1
+const F_GEN = 2
+const F_HAND = 3
 
 /** a generator's state: where it is — a rest of it taken earlier and resumed again finds it moved on */
 class GenState {
@@ -160,50 +158,40 @@ class GenState {
   }
 }
 
-class GenFrame {
-  readonly g: GenState
+/** a frame: what is done with the value coming back — `f` a function (BIND, MAP), a generator (GEN), a handler (HAND:
+ *  `h` its handler, `s` its state, `at` unused) */
+class Frame {
+  readonly t: number
+  readonly f: unknown
+  readonly s: unknown
   readonly at: number
   readonly next: Frame | null
-  constructor(g: GenState, at: number, next: Frame | null) {
-    this.g = g
+  constructor(t: number, f: unknown, s: unknown, at: number, next: Frame | null) {
+    this.t = t
+    this.f = f
+    this.s = s
     this.at = at
     this.next = next
   }
 }
 
-class Hand {
-  readonly h: Impl
-  readonly s: unknown
-  readonly next: Frame | null
-  constructor(h: Impl, s: unknown, next: Frame | null) {
-    this.h = h
-    this.s = s
-    this.next = next
-  }
-}
-
-type Frame = Bind | GenFrame | Hand
-
-function relaid(f: Frame, next: Frame | null): Frame {
-  if (f instanceof Bind) return new Bind(f.f, next)
-  if (f instanceof GenFrame) return new GenFrame(f.g, f.at, next)
-  return new Hand(f.h, f.s, next)
-}
-
 /** the frames from `from` down to `upto` (not it), laid again on `base`, in their order */
-function relay(from: Frame | null, upto: Hand, base: Frame | null): Frame | null {
+function relay(from: Frame | null, upto: Frame, base: Frame | null): Frame | null {
   const part: Frame[] = []
   for (let f = from; f !== upto; f = f!.next) part.push(f!)
   let s = base
-  for (let i = part.length - 1; i >= 0; i--) s = relaid(part[i]!, s)
+  for (let i = part.length - 1; i >= 0; i--) {
+    const f = part[i]!
+    s = new Frame(f.t, f.f, f.s, f.at, s)
+  }
   return s
 }
 
-/** a rest: the frames from `from` down to its handler, the handler's state when it was taken */
+/** a rest: the frames from `from` down to its handler's frame, the handler's state when it was taken */
 class Rest {
   readonly from: Frame | null
-  readonly hand: Hand
-  constructor(from: Frame | null, hand: Hand) {
+  readonly hand: Frame
+  constructor(from: Frame | null, hand: Frame) {
     this.from = from
     this.hand = hand
   }
@@ -226,78 +214,101 @@ export class ResumedTwice extends Error {
   }
 }
 
+type Node = Eff<unknown, unknown, boolean>
+
 /** a program run to its value, every effect handled */
 export function run<A>(p: Eff<A, never, boolean>): A {
-  let cur: Eff<unknown, unknown, boolean> = p
+  let cur: Node | null = p
+  let v: unknown = undefined
   let stack: Frame | null = null
   for (;;) {
-    switch (cur.tag) {
-      case PURE: {
-        const v = cur.x
-        if (stack === null) return v as A
-        const f: Frame = stack
-        if (f instanceof Bind) {
+    if (cur === null) {
+      if (stack === null) return v as A
+      const f: Frame = stack
+      switch (f.t) {
+        case F_BIND:
           stack = f.next
-          cur = f.f(v)
-        } else if (f instanceof GenFrame) {
-          const g = f.g
+          cur = (f.f as (a: unknown) => Node)(v)
+          break
+        case F_MAP:
+          stack = f.next
+          v = (f.f as (a: unknown) => unknown)(v)
+          break
+        case F_GEN: {
+          const g = f.f as GenState
           if (f.at !== g.at) throw new ResumedTwice("a generator's rest")
           g.at++
           const r = g.it.next(v)
           if (r.done) {
             stack = f.next
-            cur = pure(r.value)
+            v = r.value
           } else {
-            stack = new GenFrame(g, g.at, f.next)
+            stack = new Frame(F_GEN, g, undefined, g.at, f.next)
             cur = r.value
           }
-        } else {
-          stack = f.next
-          cur = f.h.ret(v, f.s)
+          break
         }
-        break
+        default:
+          stack = f.next
+          cur = (f.f as Impl).ret(v, f.s)
       }
+      continue
+    }
+    switch (cur.tag) {
+      case PURE:
+        v = cur.x
+        cur = null
+        break
       case FLATMAP:
-        stack = new Bind(cur.y as (a: unknown) => Eff<unknown, unknown, boolean>, stack)
-        cur = cur.x as Eff<unknown, unknown, boolean>
+        stack = new Frame(F_BIND, cur.y, undefined, 0, stack)
+        cur = cur.x as Node
+        break
+      case MAP:
+        stack = new Frame(F_MAP, cur.y, undefined, 0, stack)
+        cur = cur.x as Node
         break
       case DEFER:
-        cur = (cur.x as () => Eff<unknown, unknown, boolean>)()
+        cur = (cur.x as () => Node)()
         break
       case GEN: {
-        const g = new GenState((cur.x as () => Generator<Eff<unknown, unknown, boolean>, unknown, unknown>)())
+        const g = new GenState((cur.x as () => Generator<Node, unknown, unknown>)())
         const r = g.it.next()
         g.at++
-        if (r.done) cur = pure(r.value)
-        else {
-          stack = new GenFrame(g, g.at, stack)
+        if (r.done) {
+          v = r.value
+          cur = null
+        } else {
+          stack = new Frame(F_GEN, g, undefined, g.at, stack)
           cur = r.value
         }
         break
       }
       case HANDLE: {
         const h = cur.y as Impl
-        stack = new Hand(h, h.init, stack)
-        cur = cur.x as Eff<unknown, unknown, boolean>
+        stack = new Frame(F_HAND, h, h.init, 0, stack)
+        cur = cur.x as Node
         break
       }
       case PERFORM: {
         const op = cur.x as Op
-        let f = stack
-        while (f !== null && !(f instanceof Hand && (f.h.effect === op.effect || f.h.effect === null))) f = f.next
+        let f: Frame | null = stack
+        while (f !== null && !(f.t === F_HAND && ((f.f as Impl).effect === op.effect || (f.f as Impl).effect === null)))
+          f = f.next
         if (f === null) throw new Unhandled(op)
-        const hand = f as Hand
-        const h = hand.h
+        const hand: Frame = f
+        const h = hand.f as Impl
         if (h.kind === ANSWER) {
-          cur = pure(h.value!(op, hand.s))
+          v = h.value!(op, hand.s)
+          cur = null
         } else if (h.kind === STATE) {
-          const [v, s2] = h.step!(op, hand.s)
-          stack = relay(stack, hand, new Hand(h, s2, hand.next))
-          cur = pure(v)
+          const [x, s2] = h.step!(op, hand.s)
+          stack = relay(stack, hand, new Frame(F_HAND, h, s2, 0, hand.next))
+          v = x
+          cur = null
         } else {
           const rest = new Rest(stack, hand)
           let resumed = 0
-          const k = (x: unknown): Eff<unknown, unknown, boolean> => {
+          const k = (x: unknown): Node => {
             if (++resumed > 1 && !h.many) throw new ResumedTwice("a rest of a handler that resumes once")
             return new Eff(RESUME, rest, x)
           }
@@ -308,8 +319,9 @@ export function run<A>(p: Eff<A, never, boolean>): A {
       }
       case RESUME: {
         const rest = cur.x as Rest
-        stack = relay(rest.from, rest.hand, new Hand(rest.hand.h, rest.hand.s, stack))
-        cur = pure(cur.y)
+        stack = relay(rest.from, rest.hand, new Frame(F_HAND, rest.hand.f, rest.hand.s, 0, stack))
+        v = cur.y
+        cur = null
         break
       }
       default:

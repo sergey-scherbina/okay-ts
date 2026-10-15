@@ -165,11 +165,18 @@ export interface Choose<N extends string> {
 export function Choose<const N extends string>(name: N) {
   type R = Choose<N>
   const pick = (n: number): Eff<number, R> => perform(op(name, "among", [n]))
-  /** the paths from the `i`-th of `n`, each the rest resumed with its index: their values, in order */
-  const paths = <A>(k: (x: unknown) => Eff<unknown, unknown, boolean>, i: number, n: number): Eff<A[], unknown, boolean> =>
+  /** the paths from the `i`-th of `n`, each the rest resumed with its index: their values, in order — kept as a list
+   *  of the paths' lists, shared by whatever resumes this clause again, flattened at the end */
+  type Lists<A> = { readonly xs: A[]; readonly prev: Lists<A> } | null
+  const paths = <A>(k: (x: unknown) => Eff<unknown, unknown, boolean>, i: number, n: number, acc: Lists<A>): Eff<A[], unknown, boolean> =>
     i >= n
-      ? pure([])
-      : k(i).flatMap((xs) => paths<A>(k, i + 1, n).map((ys) => (xs as A[]).concat(ys)))
+      ? pure(flatten(acc))
+      : k(i).flatMap((xs) => paths<A>(k, i + 1, n, { xs: xs as A[], prev: acc }))
+  const flatten = <A>(acc: Lists<A>): A[] => {
+    const parts: A[][] = []
+    for (let c = acc; c !== null; c = c.prev) parts.push(c.xs)
+    return parts.reverse().flat()
+  }
   const firstOf = <A>(k: (x: unknown) => Eff<unknown, unknown, boolean>, i: number, n: number): Eff<A | undefined, unknown, boolean> =>
     i >= n ? pure(undefined) : k(i).flatMap((a) => (a === undefined ? firstOf<A>(k, i + 1, n) : pure(a as A)))
   return {
@@ -189,7 +196,7 @@ export function Choose<const N extends string>(name: N) {
         handleWith(
           p,
           impl(name, DEEP, true, undefined, {
-            clause: (o, k) => paths<A>(k, 0, o.args[0] as number),
+            clause: (o, k) => paths<A>(k, 0, o.args[0] as number, null),
             ret: (a) => pure([a]),
           }),
         ),
