@@ -42,4 +42,4 @@ export {
 export { Audit, audit, intercept, observe, type AuditedAll, type Clauses, type Pass, type Seen, type Watch } from "./intercept.ts"
 export { type Audited, type Handled, type Kind } from "./effects.ts"
 export { fromKernel, toKernel, type Computation, type Names } from "./kernel.ts"
-export { FarSide, HostCondition, SHIM, connect, dec, enc, serveStdio, type FarSideOptions, type Programs } from "./wire.ts"
+export { FarSide, HostCondition, SHIM, connect, connectWs, dec, enc, serveStdio, type FarSideOptions, type Programs } from "./wire.ts"

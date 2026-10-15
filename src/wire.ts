@@ -183,3 +183,17 @@ export function connect(at: { readonly host?: string; readonly port: number }, p
     })
   })
 }
+
+/** CONNECTED over a WebSocket to an okay host that accepts far sides there (okay's `ForeignWs`): a page's programs —
+ *  or a process behind a proxy that passes HTTP only — run under the host's handlers until it closes the socket. One
+ *  JSON text frame per message; the far side's hello first */
+export function connectWs(url: string, programs: Programs, opts: FarSideOptions = {}): Promise<void> {
+  return new Promise((done, failed) => {
+    const far = new FarSide(programs, opts)
+    const ws = new WebSocket(url)
+    ws.onopen = () => ws.send(JSON.stringify(far.hello()))
+    ws.onmessage = (e) => ws.send(JSON.stringify(far.serve(JSON.parse(String(e.data)))))
+    ws.onclose = () => done()
+    ws.onerror = () => failed(new Error(`okay-ts: the WebSocket to ${url} failed`))
+  })
+}

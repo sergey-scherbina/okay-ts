@@ -172,7 +172,9 @@ await connect({ host: "bank.internal", port: 9000 }, {
 })
 ```
 
-`serveStdio(programs)` serves the same over pipes, as a worker okay starts. A host's condition (a refusal) is thrown
+`connectWs(url, programs)` does the same over a WebSocket — in a page, or behind a proxy that passes HTTP only — to
+okay's `ForeignWs` (module okay-foreign-ws). `serveStdio(programs)` serves the same over pipes, as a worker okay
+starts. A host's condition (a refusal) is thrown
 where the operation was performed — a generator's `try`/`catch` catches it. Values as okay's wire writes them (a record
 a `dict`, a big integer digits). `test/wire.test.ts`: the transcript's requests and answers, multi-shot, a condition, a
 forgotten run, over TCP.
