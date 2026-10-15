@@ -130,6 +130,30 @@ no handler of it has in force, and its rest `k`: `resume(x)`, `fail(e)`, `cancel
 exception not caught, as data), `cancelled`. Before handing an operation out it asks the `host` to answer it in place
 (`Answers`: no rest taken). `run` and `runPromise` are drivers over it.
 
+## With Scala: okay-kernel's protocol
+
+okay-ts speaks okay-kernel's protocol natively — its `Step`, `Resume`, `Answers` are the protocol's — and okay-kernel's
+`js` module (Scala.js, `sbt kernelJs/fastLinkJS`) exports it from Scala to JavaScript: a computation a plain object
+`{ start(host), effects() }`. So a program of the kernel's — its reference machine, okay-core's on Scala.js — runs here
+under okay-ts's handlers, and a program of here there under the kernel's; a rest resumed many times across the border.
+
+```ts
+import { exampleAskChoose, underReaderAll } from "okay-kernel-js"
+
+const names = { Config: "Reader[Integer]", Choice: "Choose" }   // here by name, there by type
+
+fromKernel<number, Reader<"Config", number> | Choose<"Choice">>(exampleAskChoose(), names)
+  .handle(Config.value(4)).handle(Choice.all()).run()            // [40, 50]: Scala's choice, every path here
+
+underReaderAll(toKernel(p, names), 5)                            // an okay-ts program under Scala's reader and all
+```
+
+`names` binds an effect's name here to its type there. The vocabulary's operations meet by their cases' names
+(`get`, `put`, `ask`, `tell`, `raise`, `among`, `send`); `among` is given the number of the values and answered an
+index (the kernel's `Among(xs)` turned into one and back). `test/kernel.test.ts`: import, export, a thousand operations
+across in constant stack, every path of a choice resumed across, a generator's rest refused there as here, a round trip
+— skipped where okay-kernel-js is not built (`OKAY_KERNEL_JS`, else `../okay-kernel`'s).
+
 ## The machine
 
 A node and a persistent stack of frames: a handler is a delimiter on it, a rest `k` the frames down to its handler —
@@ -164,8 +188,8 @@ okay-core's suites, the same programs and values: `test/std.test.ts` (TestStd), 
 
 ## Next
 
-1. Interoperability with okay-core and okay-kernel: okay-ts implementing the kernel's protocol (`Computation`, `Step`,
-   `Resume`, `Answers`), a Scala.js module exporting it to JS (`okay-kernel-js`), the TCK run on okay-ts.
+1. The TCK on okay-ts: okay-kernel's TCK cross-built to Scala.js, run over okay-ts's `Effects` through the same module;
+   values beyond numbers and strings (a codec: `Long` and `bigint`, case classes).
 2. A remote handler: the operation and its answer as JSON, `k` staying here — a TypeScript program, its sensitive
    effects handled (and audited) by a server in Scala.
 3. Answer-type modification (`$`, `shift0`, `PState`).
